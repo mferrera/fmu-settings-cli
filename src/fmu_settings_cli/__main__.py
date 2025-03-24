@@ -1,14 +1,15 @@
 """The main entry point for fmu-settings-cli."""
 
 import argparse
+import asyncio
 import hashlib
 import secrets
 import sys
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 
-from .api_server import start_api_server
-from .gui_server import start_gui_server
+import fmu_settings_api as api
+import fmu_settings_gui as gui
 
 
 def _parse_args(args: list[str] | None = None) -> argparse.Namespace:
@@ -99,32 +100,29 @@ def start_api_and_gui(token: str, args: argparse.Namespace) -> None:
         token: Authentication token shared to api and gui
         args: The arguments taken in from invocation
     """
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        api_future = executor.submit(
-            start_api_server,
-            token,
-            host=args.host,
-            port=args.api_port,
-            frontend_host=args.host,
-            frontend_port=args.gui_port,
-        )
-        gui_future = executor.submit(
-            start_gui_server,
-            token,
-            host=args.host,
-            port=args.gui_port,
-        )
-        browser_future = executor.submit(
-            webbrowser.open,
-            f"http://localhost:{args.gui_port}/#token={token}",
-        )
+    api_server = api.run_server(
+        token=token,
+        host=args.host,
+        port=args.api_port,
+        frontend_host=args.host,
+        frontend_port=args.gui_port,
+    )
+    gui_server = gui.run_server(
+        host=args.host,
+        port=args.gui_port,
+    )
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        api_future = executor.submit(asyncio.run, gui_server.serve())
+        gui_future = executor.submit(asyncio.run, api_server.serve())
+        webbrowser.open(f"http://localhost:{args.gui_port}/#token={token}")
         try:
-            api_future.result()
+            # Blocks
             gui_future.result()
-            browser_future.result()
+            api_future.result()
         except KeyboardInterrupt:
             print("\nShutting down FMU Settings...")
-            executor.shutdown(wait=True)
+            gui_server.should_exit = True
+            api_server.should_exit = True
             sys.exit(0)
 
 
@@ -135,9 +133,11 @@ def main(test_args: list[str] | None = None) -> None:
     token = generate_auth_token()
     match args.command:
         case "api":
-            start_api_server(token, host=args.host, port=args.port)
+            asyncio.run(
+                api.run_server(token=token, host=args.host, port=args.port).serve()
+            )
         case "gui":
-            start_gui_server(token, host=args.host, port=args.port)
+            asyncio.run(gui.run_server(host=args.host, port=args.port).serve())
         case _:
             start_api_and_gui(token, args)
 
